@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ Thống Giám Sát Cứu Hộ</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        :root {
+            --bg-color: #2c3e50;
+            --card-bg: #ffffff;
+            --accent-safe: #2ecc71;
+            --accent-danger: #e74c3c;
+            --accent-warning: #f39c12;
+            --accent-info: #3498db;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            margin: 0;
+            display: flex;
+            height: 100vh;
+            color: #333;
+        }
+        /* Cột trái: Bản đồ */
+        #map-container {
+            flex: 2;
+            height: 100%;
+            position: relative;
+        }
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+        /* Cột phải: Bảng điều khiển */
+        #dashboard {
+            flex: 1;
+            background-color: var(--card-bg);
+            padding: 30px;
+            box-shadow: -5px 0 15px rgba(0,0,0,0.2);
+            display: flex;
+            flex-direction: column;
+            z-index: 1000;
+            transition: all 0.3s ease;
+            min-width: 350px;
+        }
+        .dashboard-alert {
+            background-color: #ffeaea !important;
+            border-left: 10px solid var(--accent-danger);
+            animation: pulse-bg 1.5s infinite;
+        }
+        .dashboard-offline {
+            border-left: 10px solid var(--accent-warning);
+        }
+        .dashboard-retained {
+            border-left: 10px solid var(--accent-info);
+        }
+        @keyframes pulse-bg {
+            0% { box-shadow: inset 0 0 0px rgba(231,76,60,0); }
+            50% { box-shadow: inset 0 0 30px rgba(231,76,60,0.3); }
+            100% { box-shadow: inset 0 0 0px rgba(231,76,60,0); }
+        }
+        h1 { margin-top: 0; font-size: 1.5em; text-align: center; }
+        .status-badge {
+            text-align: center;
+            padding: 15px;
+            border-radius: 8px;
+            font-weight: bold;
+            color: white;
+            background-color: var(--accent-safe);
+            margin-bottom: 25px;
+            letter-spacing: 1px;
+            transition: background-color 0.3s;
+        }
+        .dashboard-alert .status-badge {
+            background-color: var(--accent-danger);
+            animation: blink 1s infinite;
+        }
+        .dashboard-offline .status-badge {
+            background-color: var(--accent-warning);
+        }
+        .dashboard-retained .status-badge {
+            background-color: var(--accent-info);
+        }
+        @keyframes blink { 50% { opacity: 0.5; } }
+        
+        .data-card {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #3498db;
+            margin-bottom: 15px;
+        }
+        .dashboard-alert .data-card { border-left-color: var(--accent-danger); }
+        .dashboard-offline .data-card { border-left-color: var(--accent-warning); }
+        .dashboard-retained .data-card { border-left-color: var(--accent-info); }
+        
+        .data-card label { font-size: 0.85em; color: #7f8c8d; text-transform: uppercase; }
+        .data-card .value { font-size: 1.4em; font-weight: bold; margin-top: 5px; }
+        
+        #conn-status {
+            margin-top: auto;
+            text-align: center;
+            font-size: 0.85em;
+            color: #95a5a6;
+            padding-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="map-container">
+    <div id="map"></div>
+</div>
+
+<div id="dashboard">
+    <h1>TT Giám Sát Hành Trình</h1>
+    <div class="status-badge" id="status-badge">ĐANG KHỞI TẠO...</div>
+    
+    <div class="data-card">
+        <label>Thời điểm cập nhật</label>
+        <div class="value" id="val-time">--:--:--</div>
+    </div>
+    <div class="data-card">
+        <label>Lực tác động (G-Force)</label>
+        <div class="value" id="val-gforce">-- G</div>
+    </div>
+    <div class="data-card">
+        <label>Góc lệch thân xe (Pitch / Roll)</label>
+        <div class="value" id="val-angle">-- / --</div>
+    </div>
+    <div class="data-card">
+        <label>Tọa độ GPS</label>
+        <div class="value" id="val-gps" style="font-size: 1em;">Đang theo dõi...</div>
+    </div>
+
+    <div id="conn-status">Đang khởi tạo hệ thống...</div>
+</div>
+
+<script>
+// ================= 1. CẤU HÌNH BẢN ĐỒ (LEAFLET) =================
+const map = L.map('map').setView([21.028511, 105.804817], 16);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+const normalIcon = L.divIcon({
+    className: 'custom-div-icon',
+    html: "<div style='background-color:#3498db; width:20px; height:20px; border-radius:50%; border:3px solid white; box-shadow: 0 0 10px rgba(0,0,0,0.5);'></div>",
+    iconSize: [20, 20], iconAnchor: [10, 10]
+});
+
+const crashIcon = L.divIcon({
+    className: 'custom-div-icon',
+    html: "<div style='background-color:#e74c3c; width:25px; height:25px; border-radius:50%; border:3px solid white; box-shadow: 0 0 15px red;'></div>",
+    iconSize: [25, 25], iconAnchor: [12, 12]
+});
+
+let vehicleMarker = L.marker([21.028511, 105.804817], {icon: normalIcon}).addTo(map);
+
+// ================= 2. HÀM CẬP NHẬT GIAO DIỆN =================
+// Nguồn cấp: 'local' (Trình duyệt), 'retained' (MQTT cũ giữ lại), 'live' (Tin nhắn mới tới)
+function updateDashboard(data, sourceType = 'live') {
+    let newPos = [data.lat, data.lng];
+    let dashboardEl = document.getElementById("dashboard");
+    let statusBadge = document.getElementById("status-badge");
+    let connStatus = document.getElementById("conn-status");
+    
+    // Đặt marker lên bản đồ
+    vehicleMarker.setLatLng(newPos);
+    map.panTo(newPos, {animate: true, duration: 1});
+
+    // Lấy thời gian hiển thị
+    let timeStr = new Date().toLocaleTimeString();
+    if (sourceType === 'local') timeStr = localStorage.getItem("last_mqtt_time") || "--:--:--";
+
+    // 🟢 NẾU TRẠNG THÁI CHẠY BÌNH THƯỜNG
+    if(data.status === "TRACKING") {
+        vehicleMarker.setIcon(normalIcon);
+        vehicleMarker.closePopup();
+        dashboardEl.className = ""; // Xóa class
+        
+        if (sourceType === 'local') {
+            dashboardEl.classList.add("dashboard-offline");
+            statusBadge.innerText = "DỮ LIỆU CŨ (LƯU TRÊN MÁY)";
+            connStatus.innerText = "⏳ Đang chờ kết nối Server...";
+        } else if (sourceType === 'retained') {
+            dashboardEl.classList.add("dashboard-retained");
+            statusBadge.innerText = "☁️ VỊ TRÍ CUỐI CÙNG TRÊN SERVER";
+            connStatus.innerText = "☁️ Đã tự động tải vị trí cũ từ MQTT Server!";
+        } else {
+            statusBadge.innerText = "ĐANG DI CHUYỂN BÌNH THƯỜNG";
+            connStatus.innerText = "🟢 Đã đồng bộ dữ liệu trực tiếp mới nhất!";
+        }
+        
+        document.getElementById("val-gps").innerText = `${data.lat.toFixed(5)}, ${data.lng.toFixed(5)}`;
+    }
+    // 🔴 NẾU TRẠNG THÁI LÀ TAI NẠN
+    else if(data.status === "CRASH_DETECTED") {
+        vehicleMarker.setIcon(crashIcon); 
+        map.flyTo(newPos, 18, { animate: true, duration: 2 });
+        vehicleMarker.bindPopup("<b style='color:red; font-size:16px;'>🚨 TAI NẠN LÚC "+ timeStr +"!</b>").openPopup();
+
+        dashboardEl.className = "dashboard-alert";
+        
+        if (sourceType === 'local') {
+            statusBadge.innerText = "🚨 CÓ TAI NẠN (DỮ LIỆU BỘ NHỚ)";
+        } else if (sourceType === 'retained') {
+            statusBadge.innerText = "🚨 TAI NẠN CHƯA XỬ LÝ (TỪ SERVER)";
+            connStatus.innerText = "☁️ Đã tải lại trạng thái tai nạn bị bỏ lỡ!";
+        } else {
+            statusBadge.innerText = "🚨 PHÁT HIỆN TAI NẠN!";
+            connStatus.innerText = "🔴 CẢNH BÁO TRỰC TIẾP TỪ XE!";
+        }
+        
+        document.getElementById("val-gps").innerHTML = `
+            ${data.lat.toFixed(5)}, ${data.lng.toFixed(5)} <br>
+            <a href="https://www.google.com/maps/search/?api=1&query=${data.lat},${data.lng}" target="_blank" style="color:red; font-weight:bold; text-decoration:none; display:inline-block; margin-top:5px; border: 1px solid red; padding: 5px; border-radius: 5px;">
+                📍 Mở Google Maps Chỉ Đường
+            </a>
+        `;
+    }
+
+    // Cập nhật thông số chung
+    document.getElementById("val-gforce").innerText = data.g_force + " G";
+    document.getElementById("val-angle").innerText = data.pitch + "° / " + data.roll + "°";
+    document.getElementById("val-time").innerText = timeStr;
+    
+    // Lưu lại LocalStorage nếu đây là dữ liệu thực từ Server
+    if(sourceType !== 'local') {
+        localStorage.setItem("last_mqtt_data", JSON.stringify(data));
+        localStorage.setItem("last_mqtt_time", timeStr);
+    }
+}
+
+// KHÔI PHỤC DỮ LIỆU TẠM THỜI KHI VỪA MỞ WEB
+window.onload = function() {
+    let cachedData = localStorage.getItem("last_mqtt_data");
+    if (cachedData) {
+        try {
+            updateDashboard(JSON.parse(cachedData), 'local');
+        } catch(e) { console.error("Lỗi đọc dữ liệu cũ", e); }
+    }
+};
+
+// ================= 3. CẤU HÌNH MQTT =================
+const mqttServer = "broker.hivemq.com";
+const mqttPort = 8000; 
+const mqttTopic = "my_esp32_project/sos_system_123"; 
+const clientId = "WebMapClient_" + Math.random().toString(16).substr(2, 8);
+
+let client = new Paho.MQTT.Client(mqttServer, mqttPort, clientId);
+
+function connectMQTT() {
+    let connStatus = document.getElementById("conn-status");
+    if(!localStorage.getItem("last_mqtt_data")) {
+        connStatus.innerText = "🟡 Đang kết nối Máy chủ Cứu hộ...";
+    }
+    
+    client.connect({ 
+        onSuccess: () => {
+            connStatus.innerText = "🟢 Đã kết nối Hệ thống. Chờ gói tin mới...";
+            client.subscribe(mqttTopic);
+        }, 
+        onFailure: (err) => {
+            connStatus.innerText = "🔴 Lỗi kết nối. Tự làm mới sau 5 giây...";
+            setTimeout(connectMQTT, 5000);
+        } 
+    });
+}
+
+client.onConnectionLost = function(responseObject) {
+    if (responseObject.errorCode !== 0) {
+        document.getElementById("conn-status").innerText = "🔴 Mất kết nối. Đang tự động kết nối lại...";
+        setTimeout(connectMQTT, 5000);
+    }
+};
+
+client.onMessageArrived = function(message) {
+    try {
+        const t_recv = Date.now();
+        const data = JSON.parse(message.payloadString);
+
+        // ĐO ĐỘ TRỄ nếu bản tin có trường t_send_ms (từ script test Python)
+        if (data.t_send_ms) {
+            const latency = t_recv - data.t_send_ms;
+            console.log(`[LATENCY] Broker → Browser: ${latency} ms`);
+            document.getElementById("conn-status").innerText =
+                `📶 Độ trễ broker→web đo được: ${latency} ms`;
+        }
+
+        let sourceType = message.retained ? 'retained' : 'live';
+        updateDashboard(data, sourceType);
+    } catch (e) { console.error("Lỗi dữ liệu", e); }
+};
+
+connectMQTT(); 
+</script>
+
+</body>
+</html> 
